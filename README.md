@@ -1,0 +1,46 @@
+# sdcpp-serve
+
+Run multiple image generation models on the CPU with stable-diffusion.cpp.
+
+Try it:
+
+```sh
+docker compose -f compose.example.yaml up -d  # the first start downloads 5.2 GB
+curl -o image.png --data-binary 'a photograph of an astronaut riding a horse' http://localhost:8081/flux/generate
+```
+
+Run compose:
+
+```sh
+cp compose.example.yaml compose.yaml  # adjust models and port
+docker compose up -d
+```
+
+Each `sdcpp-serve` command argument is a model, `name=<sd-server flags>`, served at
+`/<name>/`. The `models` service downloads the URLs listed in it into the
+`sdcpp-serve-models` volume before the server starts.
+
+Run docker:
+
+```sh
+# the model files go into ./models, see the URLs in compose.example.yaml
+docker run -d --restart unless-stopped -p 127.0.0.1:8081:8081 \
+  -v "$PWD/models:/models:ro" \
+  ghcr.io/boriselec/sdcpp-serve:latest \
+  'flux=--diffusion-model /models/flux-2-klein-4b-Q4_0.gguf --llm /models/Qwen3-4B-Q4_K_M.gguf
+    --vae /models/full_encoder_small_decoder.safetensors --cfg-scale 1.0 --steps 4'
+```
+
+`POST /<name>/generate` takes the prompt as the body and answers with a PNG. One POST
+runs at a time across all models, others get `503`.
+
+Other API endpoints are available. See the [reference](docs/reference.md#api).
+
+[Reference (AI-generated)](docs/reference.md)
+
+## License
+
+[AGPL-3.0-only](LICENSE). The image also contains
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) (MIT), with its
+license files in `/usr/share/doc/sdcpp-serve/third-party/`. Models are under their own
+licenses.

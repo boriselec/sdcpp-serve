@@ -1,0 +1,45 @@
+# Copy to compose.yaml and adjust. Each sdcpp-serve command argument is a model,
+# name=<sd-server flags>, served at /<name>/. On start, the models service first
+# downloads missing model files into the models volume.
+services:
+  models:
+    image: curlimages/curl:8.23.0
+    # curl's home and working dir: a new volume takes its owner, so no root is needed
+    volumes: ["models:/home/curl_user"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # -C -: resume partial files, leave complete ones alone
+    entrypoint: [curl, -fL, --fail-early, -C, "-", --remote-name-all]
+    command:
+      - https://huggingface.co/leejet/FLUX.2-klein-4B-GGUF/resolve/3b1f5a9dc3abb32238b053aeb3d823c30afdacbd/flux-2-klein-4b-Q4_0.gguf
+      - https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/22c9fc8a8c7700b76a1789366280a6a5a1ad1120/Qwen3-4B-Q4_K_M.gguf
+      - https://huggingface.co/black-forest-labs/FLUX.2-small-decoder/resolve/a3efc24f613ef42d9428af62fdbd6f5fd8856c4a/full_encoder_small_decoder.safetensors
+      # - https://huggingface.co/dreamlike-art/dreamlike-diffusion-1.0/resolve/9fb5a6463bf79d81152e715e8d2a8b988f96c790/dreamlike-diffusion-1.0.safetensors
+
+  sdcpp-serve:
+    image: ghcr.io/boriselec/sdcpp-serve:latest
+    depends_on:
+      models:
+        condition: service_completed_successfully
+        required: false  # download failed - start anyway
+    ports: ["127.0.0.1:8081:8081"]  # this machine only, "8081:8081" for all networks
+    volumes: ["models:/models:ro"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    command:
+      # FLUX.2 [klein] 4B, Apache 2.0
+      - >-
+        flux=
+        --diffusion-model /models/flux-2-klein-4b-Q4_0.gguf
+        --llm /models/Qwen3-4B-Q4_K_M.gguf
+        --vae /models/full_encoder_small_decoder.safetensors
+        --cfg-scale 1.0 --steps 4
+      # Dreamlike Diffusion 1.0 (SD 1.5), modified CreativeML OpenRAIL-M
+      # - dreamlike=-m /models/dreamlike-diffusion-1.0.safetensors
+
+volumes:
+  models:
+    name: sdcpp-serve-models

@@ -50,8 +50,9 @@ FROM source AS server
 
 COPY server.cpp /server/
 
-RUN g++ -std=c++23 -O2 -Wall -Wextra -s -isystem thirdparty \
-    -o /server/sdcpp-serve /server/server.cpp -pthread
+RUN gcc -O2 -c thirdparty/utf8proc/utf8proc.c -o /server/utf8proc.o \
+  && g++ -std=c++23 -O2 -Wall -Wextra -s -isystem thirdparty \
+    -o /server/sdcpp-serve /server/server.cpp /server/utf8proc.o -pthread
 
 # only the runtime libraries, no shell, non-root
 # its glibc must not be older than the build stage's (Ubuntu 24.04)

@@ -7,6 +7,7 @@
 
 #include <csignal>
 #include <cstdio>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -16,9 +17,11 @@
 
 #include "httplib.h"
 #include "json.hpp"
+#include "utf8proc/utf8proc.h"
 
 std::map<std::string, int> model_to_port;
 
+bool is_utf8_text(const std::string &body);
 bool is_openai_request(const std::string &body);
 std::string base64_decode(const std::string &in);
 
@@ -39,19 +42,22 @@ void generate(const httplib::Request &req, httplib::Response &res) {
         res.status = 415;
         return;
     }
+    if (!is_utf8_text(req.body)) {
+        res.status = 400;
+        res.set_content("the prompt is not UTF-8 text", "text/plain");
+        return;
+    }
     // a request for OpenAI-style APIs
     if (is_openai_request(req.body)) {
         res.status = 400;
-        res.set_content(R"({"error":"send the prompt itself, not a JSON request"})",
-                        "application/json");
+        res.set_content("send the prompt itself, not a JSON request", "text/plain");
         return;
     }
     // sd-server would take settings from this block in the prompt, see
     // extract_and_remove_sd_cpp_extra_args() in examples/server/routes_openai.cpp
     if (req.body.contains("<sd_cpp_extra_args>")) {
         res.status = 400;
-        res.set_content(R"({"error":"generation settings are fixed at startup"})",
-                        "application/json");
+        res.set_content("generation settings are fixed at startup", "text/plain");
         return;
     }
     // one generation at the same time, across all models, others get 503
@@ -73,7 +79,8 @@ void generate(const httplib::Request &req, httplib::Response &res) {
         return;
     }
     if (r->status != 200) {
-        // sd-server's error, passed on
+        fprintf(stderr, "sdcpp-serve: %s: sd-server answered %d: %s\n",
+                req.path.c_str(), r->status, r->body.c_str());
         res.status = r->status;
         res.set_content(r->body, r->get_header_value("Content-Type"));
         return;
@@ -134,8 +141,36 @@ int main(int argc, char **argv) {
     httplib::Server server;
     // the same as httplib's fixed limit for application/x-www-form-urlencoded
     server.set_payload_max_length(8 * 1024);
+    server.set_exception_handler([](const httplib::Request &req,
+                                    httplib::Response &res,
+                                    std::exception_ptr ep) {
+        try {
+            std::rethrow_exception(ep);
+        } catch (const std::exception &e) {
+            fprintf(stderr, "sdcpp-serve: %s: %s\n", req.path.c_str(), e.what());
+        } catch (...) {
+            fprintf(stderr, "sdcpp-serve: %s: unknown exception\n", req.path.c_str());
+        }
+        res.status = 500;
+    });
     server.Post("/:model/generate", generate);
     server.listen("0.0.0.0", 8081);
+}
+
+// valid UTF-8, without control characters other than tab and line breaks
+bool is_utf8_text(const std::string &body) {
+    auto p = reinterpret_cast<const utf8proc_uint8_t *>(body.data());
+    auto end = p + body.size();
+    while (p < end) {
+        utf8proc_int32_t c;
+        utf8proc_ssize_t n = utf8proc_iterate(p, end - p, &c);
+        if (n < 0 || (utf8proc_category(c) == UTF8PROC_CATEGORY_CC &&
+                      c != '\t' && c != '\n' && c != '\r')) {
+            return false;
+        }
+        p += n;
+    }
+    return true;
 }
 
 bool is_openai_request(const std::string &body) {

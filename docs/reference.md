@@ -35,8 +35,12 @@ API included, and so does anything new releases add.
 **Synchronous, one image at a time.** A request during a generation gets `503` at once
 instead of waiting in a queue.
 
-**The body is the prompt, as text.** A body that is something else, a JSON request, a
-multipart form or an oversized upload, is refused, not read as a prompt.
+**The body is the prompt, as UTF-8 text.** Anything else, a JSON request, a multipart
+form, binary, or an oversized upload, is refused, not read as a prompt.
+
+**A `4xx` is final, a `5xx` is worth retrying.** A `4xx` is about the request and comes
+back the same every time. A `5xx` is about the server and the same request can succeed
+later. This holds for sd-server's own errors too, passed on unchanged.
 
 **A small C++ router, no Python.** It builds from libraries already in
 stable-diffusion.cpp's source and runs on distroless.
@@ -132,21 +136,27 @@ sites and apps that earn revenue or donations.
 sd-server's `/v1/images/generations`, waits up to an hour, and answers with the PNG from
 `data[0].b64_json`.
 
+The body must be UTF-8 text: valid UTF-8 without control characters other than tab and
+line breaks. Its `Content-Type` must be `text/plain`,
+`application/x-www-form-urlencoded` (curl's default) or absent; a `charset` is ignored.
+It must not be a JSON object with a string `"prompt"`, which is an OpenAI-style request,
+nor contain `<sd_cpp_extra_args>`, sd-server's per-request settings. Other JSON is a
+prompt like any text, such as the structured prompts of FLUX.2 and Fibo.
+
 | Status | When |
 | --- | --- |
 | 200 | the PNG, `image/png` |
-| 400 | the body is a JSON object with a string `"prompt"`, as sent to OpenAI-style APIs: `{"error":"send the prompt itself, not a JSON request"}` |
-| 400 | the prompt contains `<sd_cpp_extra_args>`, sd-server's per-request settings: `{"error":"generation settings are fixed at startup"}` |
+| 400 | the body is not UTF-8 text, a JSON request, or has `<sd_cpp_extra_args>`; the reason is a plain-text body |
 | 404 | an unknown model, or any other method or path |
-| 413 | the body is over 8 KiB, on any path |
-| 415 | the `Content-Type` is not `text/plain`, `application/x-www-form-urlencoded` (curl's default) or missing; parameters such as `charset` are ignored |
-| 500 | the prompt is not valid UTF-8, or sd-server's reply cannot be read |
+| 413 | the body is over 8 KiB |
+| 415 | an unsupported `Content-Type` |
+| 500 | an unexpected error, such as a reply from sd-server that cannot be read |
 | 502 | no answer from sd-server, also while it is starting |
 | 503 | another image is being generated, by any model |
-| other | sd-server's own error, passed on |
 
-Other JSON is a prompt like any text, such as the structured prompts of FLUX.2 and Fibo.
-The router's own errors have no body, except the two `400`s.
+An sd-server error is passed on with its status and body: a `4xx` for a refused prompt
+or a model that generates no image, a `5xx` for a generation that fails. The router logs
+each one, and its own `500`, as `sdcpp-serve: <path>: ...`.
 
 ## Process
 
@@ -188,7 +198,7 @@ sd-server runs one thread per physical core of the machine and does not see a
 2. **build**: upstream's CPU build, without the web UI. On amd64 all 14 x86 CPU
    variants, ggml loads the best one at startup. On arm64 native to the build machine;
    the all-variants build fails there with GCC 13.
-3. **server**: the router, C++23, with cpp-httplib and nlohmann/json from
+3. **server**: the router, C++23, with cpp-httplib, nlohmann/json and utf8proc from
    stable-diffusion.cpp's `thirdparty/`, in parallel with **build**.
 4. **final**: `gcr.io/distroless/cc-debian13:nonroot`, with glibc, libstdc++ and libgomp
    and no shell, package manager or root. Its glibc must not be older than the build

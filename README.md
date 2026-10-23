@@ -37,10 +37,11 @@ docker run -d --restart unless-stopped -p 127.0.0.1:8081:8081 \
 
 ## API
 
-`POST /<name>/generate` takes the prompt as the body and answers with a PNG. One POST
-runs at a time across all models, others get `503`.
+`POST /<name>/generate` takes the prompt as the body and answers with a PNG.
 
-Other API endpoints are available. See the [reference](docs/reference.md#api).
+- one POST runs at a time across all models, others get `503`
+- the model's flags are all its settings, a request cannot change them
+- sd-server's own API is not reachable
 
 [Reference (AI-generated)](docs/reference.md)
 

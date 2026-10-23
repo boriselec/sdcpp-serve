@@ -50,7 +50,7 @@ FROM source AS server
 
 COPY server.cpp /server/
 
-RUN g++ -std=c++17 -O2 -Wall -Wextra -s -isystem thirdparty \
+RUN g++ -std=c++23 -O2 -Wall -Wextra -s -isystem thirdparty \
     -o /server/sdcpp-serve /server/server.cpp -pthread
 
 # only the runtime libraries, no shell, non-root

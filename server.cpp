@@ -1,6 +1,6 @@
 // sdcpp-serve name='<sd-server flags>' ...
-// One sd-server per model, all on port 8081. /<name>/... goes to that model's
-// sd-server API, except our own POST /<name>/generate.
+// One sd-server per model, all on port 8081. The only API is POST /<name>/generate:
+// synchronous, one image at a time, with the settings given at startup.
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -8,7 +8,6 @@
 #include <csignal>
 #include <cstdio>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -18,54 +17,57 @@
 #include "httplib.h"
 #include "json.hpp"
 
-std::map<std::string, int> ports;  // model name -> sd-server port
-std::mutex busy;
+std::map<std::string, int> model_to_port;
 
-std::unique_ptr<httplib::Client> connect(const httplib::Request &req,
-                                         httplib::Response &res);
+bool is_openai_request(const std::string &body);
 std::string base64_decode(const std::string &in);
 
-// sd-server's own APIs, passed on unchanged
-void forward(const httplib::Request &req, httplib::Response &res) {
-    auto client = connect(req, res);
-    if (!client) {
-        return;
-    }
-    std::string path = req.target.substr(req.target.find('/', 1));
-    httplib::Result r;
-    if (req.method == "GET") {
-        r = client->Get(path);
-    } else if (req.is_multipart_form_data()) {
-        // httplib splits an upload into fields and files, so rebuild it
-        httplib::UploadFormDataItems items;
-        for (const auto &[name, field] : req.form.fields) {
-            items.push_back({name, field.content, "", ""});
-        }
-        for (const auto &[name, file] : req.form.files) {
-            items.push_back({name, file.content, file.filename, file.content_type});
-        }
-        r = client->Post(path, items);
-    } else {
-        r = client->Post(path, req.body, req.get_header_value("Content-Type"));
-    }
-    if (!r) {
-        res.status = 502;
-        return;
-    }
-    res.status = r->status;
-    res.set_content(r->body, r->get_header_value("Content-Type"));
-}
-
-// Our own API, simpler than sd-server's. The body is the prompt as plain text and
-// the answer is a PNG. It calls sd-server's /v1/images/generations and decodes the
-// image from the JSON reply.
+// plain text prompt -> PNG
 void generate(const httplib::Request &req, httplib::Response &res) {
-    auto client = connect(req, res);
-    if (!client) {
+    auto model_and_port = model_to_port.find(req.path_params.at("model"));
+    if (model_and_port == model_to_port.end()) {
+        res.status = 404;
         return;
     }
+    // the body is the prompt, as text: curl's default form type is fine, but not JSON,
+    // or multipart, which httplib takes apart and leaves the body empty
+    std::string type = req.get_header_value("Content-Type");
+    type = type.substr(0, type.find(';'));
+    if (type != "" &&
+        type != "text/plain" &&
+        type != "application/x-www-form-urlencoded") {
+        res.status = 415;
+        return;
+    }
+    // a request for OpenAI-style APIs
+    if (is_openai_request(req.body)) {
+        res.status = 400;
+        res.set_content(R"({"error":"send the prompt itself, not a JSON request"})",
+                        "application/json");
+        return;
+    }
+    // sd-server would take settings from this block in the prompt, see
+    // extract_and_remove_sd_cpp_extra_args() in examples/server/routes_openai.cpp
+    if (req.body.contains("<sd_cpp_extra_args>")) {
+        res.status = 400;
+        res.set_content(R"({"error":"generation settings are fixed at startup"})",
+                        "application/json");
+        return;
+    }
+    // one generation at the same time, across all models, others get 503
+    static std::mutex busy;
+    std::unique_lock lock(busy, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        res.status = 503;
+        return;
+    }
+    // no keep-alive: sd-server doesn't set TCP_NODELAY, reused connections wait ~40 ms
+    httplib::Client client("127.0.0.1", model_and_port->second);
+    client.set_read_timeout(std::chrono::hours(1));
     std::string body = nlohmann::json{{"prompt", req.body}}.dump();
-    auto r = client->Post("/v1/images/generations", body, "application/json");
+    auto r = client.Post("/v1/images/generations", body, "application/json");
+    lock.unlock();
+
     if (!r) {
         res.status = 502;
         return;
@@ -78,19 +80,6 @@ void generate(const httplib::Request &req, httplib::Response &res) {
     }
     auto png = nlohmann::json::parse(r->body)["data"][0]["b64_json"];
     res.set_content(base64_decode(png.get<std::string>()), "image/png");
-}
-
-// One generation at the same time.
-// Others get 503.
-httplib::Server::Handler one_at_a_time(httplib::Server::Handler handler) {
-    return [handler](const httplib::Request &req, httplib::Response &res) {
-        std::unique_lock<std::mutex> lock(busy, std::try_to_lock);
-        if (!lock.owns_lock()) {
-            res.status = 503;
-            return;
-        }
-        handler(req, res);
-    };
 }
 
 int main(int argc, char **argv) {
@@ -110,7 +99,7 @@ int main(int argc, char **argv) {
         }
         int port = 1234 + (i - 1);
         std::string model = arg.substr(0, eq);
-        if (!ports.emplace(model, port).second) {
+        if (!model_to_port.emplace(model, port).second) {
             fprintf(stderr, "model named twice: %s\n", model.c_str());
             return 1;
         }
@@ -143,24 +132,24 @@ int main(int argc, char **argv) {
     }).detach();
 
     httplib::Server server;
-    server.Post("/([^/]+)/generate", one_at_a_time(generate));
-    server.Get("/([^/]+)/.*", forward);
-    server.Post("/([^/]+)/.*", one_at_a_time(forward));
+    // the same as httplib's fixed limit for application/x-www-form-urlencoded
+    server.set_payload_max_length(8 * 1024);
+    server.Post("/:model/generate", generate);
     server.listen("0.0.0.0", 8081);
 }
 
-// a client for the sd-server of the model named first in the path, or a 404
-std::unique_ptr<httplib::Client> connect(const httplib::Request &req,
-                                         httplib::Response &res) {
-    auto model = ports.find(req.matches[1]);
-    if (model == ports.end()) {
-        res.status = 404;
-        return nullptr;
+bool is_openai_request(const std::string &body) {
+    // cheap exit for plain prompts
+    size_t start = body.starts_with("\xEF\xBB\xBF") ? 3 : 0;
+    start = body.find_first_not_of(" \t\r\n", start);
+    if (start == std::string::npos || body[start] != '{') {
+        return false;
     }
-    auto client = std::make_unique<httplib::Client>("127.0.0.1", model->second);
-    client->set_read_timeout(std::chrono::hours(1));
-    client->set_path_encode(false);  // the target is passed on as it came
-    return client;
+
+    auto json = nlohmann::json::parse(body, nullptr, false);
+    // structured prompts are JSON objects too, without "prompt"
+    auto prompt = json.find("prompt");
+    return prompt != json.end() && prompt->is_string();
 }
 
 std::string base64_decode(const std::string &in) {

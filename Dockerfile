@@ -7,8 +7,8 @@ RUN apt-get update \
     build-essential cmake git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# stable-diffusion.cpp release master-975-95b3090
-ARG SDCPP_COMMIT=95b3090664d019fcf8fa032a44d1d4793ba244b8
+# stable-diffusion.cpp release master-995-fd21ecf
+ARG SDCPP_COMMIT=fd21ecfceef2665d2c5f2db8536e3202d864fd30
 
 WORKDIR /sd.cpp
 
@@ -17,11 +17,6 @@ RUN git init -q . \
   && git fetch -q --depth 1 origin ${SDCPP_COMMIT} \
   && git checkout -q FETCH_HEAD \
   && git submodule update -q --init --depth 1 ggml
-
-# sd.cpp reads /sys/devices/system/cpuN instead of .../cpu/cpuN, so its default thread
-# count on Linux is half the CPUs, not the physical cores. Remove once fixed upstream.
-RUN sed -i 's|system/cpu" +|system/cpu/cpu" +|' src/core/util.cpp \
-  && grep -q 'system/cpu/cpu"' src/core/util.cpp
 
 FROM source AS build
 

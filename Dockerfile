@@ -30,6 +30,9 @@ RUN if [ "$TARGETARCH" = amd64 ]; then \
       CPU_ARGS="-DGGML_NATIVE=ON"; \
     fi \
   && cmake -B build $CPU_ARGS \
+    # tinyBLAS from llamafile: faster matmul for Q4_0, F16, BF16 and F32 weights.
+    # ggml's default is off, llama.cpp's on. ARM with SVE or i8mm ignores it
+    -DGGML_LLAMAFILE=ON \
     -DSD_SERVER_BUILD_FRONTEND=OFF \
     -DSD_BUILD_SHARED_LIBS=ON \
     -DSD_BUILD_SHARED_GGML_LIB=ON \
